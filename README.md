@@ -108,6 +108,14 @@ SEND=1 cargo run --example builder_e2e
 
 Set `AEVO_API_KEY`, `AEVO_API_SECRET`, `AEVO_WALLET_KEY`, `AEVO_SIGNING_KEY`, `AEVO_ACCOUNT`, `AEVO_BUILDER_ID`, and `AEVO_INSTRUMENT` as needed.
 
+## Development
+
+CI runs formatting, clippy, tests, examples, crate packaging, documentation with warnings denied, the MSRV check, and the signing vector guard. See [CONTRIBUTING.md](CONTRIBUTING.md) for the required SDK standard and [RELEASING.md](RELEASING.md) for the tag-and-approval release process.
+
+## Versioning
+
+This crate follows semver. While the crate is `0.x`, minor versions may include breaking changes and patch versions should remain backward-compatible.
+
 ## Sibling SDKs
 
 | Language | Repository |
@@ -120,9 +128,12 @@ Set `AEVO_API_KEY`, `AEVO_API_SECRET`, `AEVO_WALLET_KEY`, `AEVO_SIGNING_KEY`, `A
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --examples
+cargo +1.88.0 check --locked --all-targets
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked --examples
+cargo package --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 ```
 
 ## License

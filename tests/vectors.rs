@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use aevo_sdk::config::Env;
 use aevo_sdk::models::BuilderFields;
@@ -45,6 +46,14 @@ fn s(value: &Value) -> &str {
     value.as_str().unwrap()
 }
 
+fn require_non_empty_array<'a>(value: &'a Value, path: &str) -> &'a Vec<Value> {
+    let array = value
+        .as_array()
+        .unwrap_or_else(|| panic!("{path} must be an array"));
+    assert!(!array.is_empty(), "{path} must not be empty");
+    array
+}
+
 fn raw_to_rate(raw: &str) -> String {
     let mut digits = raw.to_string();
     while digits.len() <= 6 {
@@ -84,6 +93,53 @@ impl EmptyDefault for &str {
         } else {
             self.to_string()
         }
+    }
+}
+
+#[test]
+fn vectors_file_contains_every_expected_domain_and_kind() {
+    let root = vectors();
+    assert_eq!(
+        s(&root["schema_version"]),
+        "aevo-sdk-signing-vectors/v1",
+        "unexpected vectors schema"
+    );
+
+    let expected_domains = ["mainnet", "testnet"];
+    let expected_vector_kinds = [
+        "order_plain",
+        "order_builder",
+        "register",
+        "sign_key",
+        "approve_builder",
+        "withdraw",
+        "transfer",
+    ];
+
+    let domains = require_non_empty_array(&root["domains"], "domains");
+    let domain_ids: HashSet<&str> = domains.iter().map(|domain| s(&domain["id"])).collect();
+    for expected_domain in expected_domains {
+        assert!(
+            domain_ids.contains(expected_domain),
+            "vectors.json is missing domain {expected_domain}"
+        );
+    }
+
+    for domain in domains {
+        let domain_id = s(&domain["id"]);
+        if !expected_domains.contains(&domain_id) {
+            continue;
+        }
+        for kind in expected_vector_kinds {
+            require_non_empty_array(
+                &domain["vectors"][kind],
+                &format!("domains.{domain_id}.vectors.{kind}"),
+            );
+        }
+    }
+
+    for kind in ["rest", "websocket"] {
+        require_non_empty_array(&root["hmac"][kind], &format!("hmac.{kind}"));
     }
 }
 
