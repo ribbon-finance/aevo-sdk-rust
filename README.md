@@ -2,7 +2,7 @@
 
 Official Rust SDK for [Aevo](https://aevo.xyz).
 
-> **Status: pre-release, unpublished.** The crate name is `aevo-sdk`, version `0.1.0`. Do not publish to crates.io until the release process and license are finalized.
+> **Status: pre-release, unpublished.** The crate name is `aevo-sdk`, version `0.1.0`. Not yet published to crates.io; see [RELEASING.md](RELEASING.md).
 
 ## Install
 
@@ -138,4 +138,4 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 
 ## License
 
-To be decided before the first release.
+MIT. Copyright (c) 2026 Aevo. See [LICENSE](LICENSE).

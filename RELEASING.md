@@ -1,6 +1,6 @@
 # Releasing
 
-This crate is not ready to publish until Aevo chooses and records the package license.
+The crate is MIT-licensed (Copyright (c) 2026 Aevo); the release workflow refuses to publish if the license is ever unset, `TBD` or `UNLICENSED`.
 
 ## One-Time Setup
 
@@ -13,7 +13,7 @@ This crate is not ready to publish until Aevo chooses and records the package li
 
 1. Bump `version` in `Cargo.toml`.
 2. Move the matching `CHANGELOG.md` section from `unreleased` to the release date and keep `## [Unreleased]` at the top.
-3. Decide and set the package license in `Cargo.toml` before the first publish.
+3. Confirm `license = "MIT"` is still set in `Cargo.toml`.
 4. Open a PR and wait for CI to pass.
 5. Merge to `main`.
 6. Create and push the tag:

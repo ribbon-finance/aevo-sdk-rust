@@ -3,6 +3,8 @@ name = "aevo-sdk"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
+license = "MIT"
+authors = ["Aevo"]
 description = "Official Rust SDK for Aevo"
 repository = "https://github.com/ribbon-finance/aevo-sdk-rust"
 
