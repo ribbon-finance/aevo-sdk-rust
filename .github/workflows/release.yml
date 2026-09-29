@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  MSRV: "1.88.0"
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustup toolchain install "$MSRV" --profile minimal
+
+      - name: Verify tag and changelog
+        run: |
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+          import tomllib
+
+          package = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]
+          version = package["version"]
+          expected_tag = f"v{version}"
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != expected_tag:
+              print(f"::error::tag {tag} does not match Cargo.toml version {version} ({expected_tag})")
+              sys.exit(1)
+
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          pattern = rf"^## \[{re.escape(version)}\](?: - .*)?$"
+          if not re.search(pattern, changelog, re.MULTILINE):
+              print(f"::error::CHANGELOG.md is missing a section for {version}")
+              sys.exit(1)
+          PY
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: MSRV
+        run: cargo +"$MSRV" check --locked --all-targets
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets
+
+      - name: Build examples
+        run: cargo build --locked --examples
+
+      - name: Package dry run
+        run: cargo package --locked
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Verify publish license
+        run: |
+          python3 <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          package = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]
+          license_value = package.get("license", "").strip()
+          license_file = package.get("license-file", "").strip()
+          invalid = {"", "TBD", "UNLICENSED"}
+          if not license_file and license_value.upper() in invalid:
+              print("::error::Cargo.toml must set a real package.license or license-file before publishing")
+              sys.exit(1)
+          PY
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract changelog notes
+        run: |
+          python3 <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          changelog = pathlib.Path("CHANGELOG.md").read_text()
+          header = re.search(rf"^## \[{re.escape(version)}\](?: - .*)?\n", changelog, re.MULTILINE)
+          if not header:
+              print(f"::error::CHANGELOG.md is missing a section for {version}")
+              sys.exit(1)
+          next_header = re.search(r"^## \[", changelog[header.end():], re.MULTILINE)
+          end = header.end() + next_header.start() if next_header else len(changelog)
+          notes = changelog[header.end():end].strip()
+          pathlib.Path("RELEASE_NOTES.md").write_text(notes + "\n")
+          PY
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
