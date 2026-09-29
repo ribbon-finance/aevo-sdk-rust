@@ -5,6 +5,23 @@ use aevo_sdk::{AevoClient, AuthMode, Env, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
     let send = std::env::var("SEND").ok().as_deref() == Some("1");
+    // The fallback keys below are the PUBLIC test-vector keys: fine for a dry run,
+    // never for sending. Real sends must use the caller's own keys.
+    if send {
+        for name in [
+            "AEVO_API_KEY",
+            "AEVO_API_SECRET",
+            "AEVO_WALLET_KEY",
+            "AEVO_SIGNING_KEY",
+            "AEVO_ACCOUNT",
+        ] {
+            if std::env::var(name).map(|v| v.is_empty()).unwrap_or(true) {
+                return Err(aevo_sdk::AevoError::InvalidInput(format!(
+                    "SEND=1 requires {name}; the built-in defaults are public test keys"
+                )));
+            }
+        }
+    }
     let api_key = std::env::var("AEVO_API_KEY").unwrap_or_default();
     let api_secret = std::env::var("AEVO_API_SECRET").unwrap_or_default();
     let wallet_key = std::env::var("AEVO_WALLET_KEY").unwrap_or_else(|_| {
