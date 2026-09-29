@@ -1,8 +1,10 @@
 use aevo_sdk::models::SignedOrder;
 use aevo_sdk::ws::{
-    auth_frame, create_order_frame, parse_message, subscribe_frame, unsubscribe_frame, WsChannel,
+    auth_frame, cancel_order_frame, create_order_frame, edit_order_frame, parse_message,
+    subscribe_frame, unsubscribe_frame, WsChannel,
 };
 use serde_json::json;
+use std::collections::BTreeSet;
 
 fn sample_order() -> SignedOrder {
     SignedOrder {
@@ -69,6 +71,48 @@ fn create_order_frame_includes_builder_fields_in_data() {
     assert_eq!(frame["auth"], json!({"key": "k"}));
     assert_eq!(frame["data"]["builder_id"], "builder_0123456789abcdef");
     assert_eq!(frame["data"]["builder_fee_rate"], "0.0003");
+}
+
+#[test]
+fn cancel_order_frame_uses_order_id_in_data() {
+    let frame = cancel_order_frame(8, "0xorder");
+
+    assert_eq!(frame["id"], 8);
+    assert_eq!(frame["op"], "cancel_order");
+    assert_eq!(frame["data"]["order_id"], "0xorder");
+    assert!(frame["data"].get("id").is_none());
+}
+
+#[test]
+fn edit_order_frame_uses_flat_order_data_plus_order_id() {
+    let order = sample_order();
+    let create = create_order_frame(9, &order, None).unwrap();
+    let edit = edit_order_frame(10, "0xorder", &order, Some(json!({"key": "k"}))).unwrap();
+
+    assert_eq!(edit["id"], 10);
+    assert_eq!(edit["op"], "edit_order");
+    assert_eq!(edit["auth"], json!({"key": "k"}));
+    assert_eq!(edit["data"]["order_id"], "0xorder");
+    assert_eq!(edit["data"]["maker"], order.maker);
+    assert_eq!(edit["data"]["builder_id"], "builder_0123456789abcdef");
+    assert!(edit["data"].get("id").is_none());
+    assert!(edit["data"].get("order").is_none());
+
+    let create_keys = create["data"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut expected_edit_keys = create_keys.clone();
+    expected_edit_keys.insert("order_id".to_string());
+    let edit_keys = edit["data"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(edit_keys, expected_edit_keys);
 }
 
 #[test]

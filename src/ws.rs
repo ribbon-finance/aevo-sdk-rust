@@ -111,25 +111,13 @@ impl AevoWebSocket {
 
     pub async fn publish_edit_order(&mut self, order_id: &str, order: &SignedOrder) -> Result<()> {
         let id = self.next_request_id();
-        self.send_value(json!({
-            "id": id,
-            "op": "edit_order",
-            "data": {
-                "id": order_id,
-                "order": order,
-            }
-        }))
-        .await
+        self.send_value(edit_order_frame(id, order_id, order, None)?)
+            .await
     }
 
     pub async fn publish_cancel_order(&mut self, order_id: &str) -> Result<()> {
         let id = self.next_request_id();
-        self.send_value(json!({
-            "id": id,
-            "op": "cancel_order",
-            "data": { "id": order_id }
-        }))
-        .await
+        self.send_value(cancel_order_frame(id, order_id)).await
     }
 
     pub async fn publish_cancel_all(&mut self) -> Result<()> {
@@ -268,6 +256,28 @@ pub fn create_order_frame(id: u64, order: &SignedOrder, auth: Option<Value>) -> 
         frame["auth"] = auth;
     }
     Ok(frame)
+}
+
+pub fn edit_order_frame(
+    id: u64,
+    order_id: &str,
+    order: &SignedOrder,
+    auth: Option<Value>,
+) -> Result<Value> {
+    let mut frame = create_order_frame(id, order, auth)?;
+    frame["op"] = json!("edit_order");
+    if let Some(data) = frame["data"].as_object_mut() {
+        data.insert("order_id".to_string(), json!(order_id));
+    }
+    Ok(frame)
+}
+
+pub fn cancel_order_frame(id: u64, order_id: &str) -> Value {
+    json!({
+        "id": id,
+        "op": "cancel_order",
+        "data": { "order_id": order_id }
+    })
 }
 
 pub fn parse_message(text: &str) -> Result<WsMessage> {

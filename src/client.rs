@@ -415,6 +415,7 @@ impl AevoClient {
     ) -> Result<reqwest::Response> {
         let path = normalize_path(path);
         let url = format!("{}{}", self.base_url, path);
+        let signed_path = Url::parse(&url)?.path().to_string();
         let body_string = body
             .map(serde_json::to_string)
             .transpose()?
@@ -427,7 +428,7 @@ impl AevoClient {
             request = request.json(body);
         }
         if auth {
-            request = self.apply_auth(request, method.as_str(), &path, &body_string)?;
+            request = self.apply_auth(request, method.as_str(), &signed_path, &body_string)?;
         }
         Ok(request.send().await?)
     }

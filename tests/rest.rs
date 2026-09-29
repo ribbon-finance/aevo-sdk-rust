@@ -1,5 +1,5 @@
 use aevo_sdk::models::*;
-use aevo_sdk::{AevoClient, AuthMode, BuilderErrorCode};
+use aevo_sdk::{signing, AevoClient, AuthMode, BuilderErrorCode};
 use serde_json::json;
 use wiremock::matchers::{
     body_json, header, header_exists, method, path, query_param, query_param_is_missing,
@@ -429,6 +429,55 @@ async fn hmac_auth_mode_sends_signed_headers_without_secret_header() {
         .and(header("AEVO-KEY", "key"))
         .and(header_exists("AEVO-TIMESTAMP"))
         .and(header_exists("AEVO-SIGNATURE"))
+        .respond_with(ok_json())
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client.account().await.unwrap();
+}
+
+#[tokio::test]
+async fn hmac_auth_mode_signs_base_url_path_prefix() {
+    let server = MockServer::start().await;
+    let client = AevoClient::builder()
+        .base_url(format!("{}/prefix", server.uri()))
+        .api_key("key")
+        .api_secret("secret")
+        .auth_mode(AuthMode::Hmac)
+        .build()
+        .unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/prefix/account"))
+        .and(header("AEVO-KEY", "key"))
+        .and(|request: &wiremock::Request| {
+            let Some(timestamp) = request
+                .headers
+                .get("AEVO-TIMESTAMP")
+                .and_then(|value| value.to_str().ok())
+            else {
+                return false;
+            };
+            let Some(signature) = request
+                .headers
+                .get("AEVO-SIGNATURE")
+                .and_then(|value| value.to_str().ok())
+            else {
+                return false;
+            };
+            let Ok(expected) = signing::hmac_signature(
+                "key",
+                "secret",
+                timestamp,
+                request.method.as_str(),
+                "/prefix/account",
+                "",
+            ) else {
+                return false;
+            };
+            signature == expected
+        })
         .respond_with(ok_json())
         .expect(1)
         .mount(&server)
