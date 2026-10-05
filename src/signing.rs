@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,7 +13,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::config::Env;
+use crate::config::{Env, Secret};
 use crate::error::{AevoError, Result};
 use crate::models::{
     ApproveBuilderRequest, BuilderFields, RegisterRequest, SignedOrder, SignedTransfer,
@@ -31,6 +33,41 @@ pub struct SignatureResult<T> {
     pub payload: T,
     pub hash: String,
     pub signature: String,
+}
+
+pub type SignDigestFuture<'a> = Pin<Box<dyn Future<Output = Result<[u8; 65]>> + Send + 'a>>;
+
+pub trait DigestSigner {
+    fn address(&self) -> String;
+    fn sign_digest(&self, digest: [u8; 32]) -> SignDigestFuture<'_>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalKeySigner {
+    private_key: Secret,
+    address: String,
+}
+
+impl LocalKeySigner {
+    pub fn new(private_key: impl AsRef<str>) -> Result<Self> {
+        let private_key = normalize_private_key(private_key.as_ref())?;
+        let address = derive_address(&private_key)?;
+        Ok(Self {
+            private_key: Secret::new(private_key),
+            address,
+        })
+    }
+}
+
+impl DigestSigner for LocalKeySigner {
+    fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    fn sign_digest(&self, digest: [u8; 32]) -> SignDigestFuture<'_> {
+        let private_key = self.private_key.expose().to_string();
+        Box::pin(async move { sign_digest_bytes(&private_key, digest) })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +303,10 @@ pub fn rate_to_raw(value: &str) -> Result<String> {
     decimal_to_scaled(value, "rate", SCALE_6)
 }
 
+pub(crate) fn normalize_rate(value: &str) -> Result<String> {
+    normalize_decimal6(value, "max_fee_rate")
+}
+
 pub fn bps_to_rate(bps: u32) -> Result<String> {
     let raw = U256::from(bps) * U256::from(100u64);
     raw6_to_decimal(raw)
@@ -485,6 +526,36 @@ pub fn sign_sign_key(
     })
 }
 
+pub fn approve_builder_typed_data(
+    env: Env,
+    account: &str,
+    builder_id: &str,
+    max_fee_rate: &str,
+    nonce: &str,
+) -> Result<Value> {
+    Ok(typed_data_json(
+        env,
+        "ApproveBuilder",
+        approve_builder_fields(),
+        approve_builder_message(account, builder_id, max_fee_rate, nonce)?,
+    ))
+}
+
+pub fn approve_builder_digest(
+    env: Env,
+    account: &str,
+    builder_id: &str,
+    max_fee_rate: &str,
+    nonce: &str,
+) -> Result<[u8; 32]> {
+    hash_typed_data(
+        env,
+        "ApproveBuilder",
+        approve_builder_fields(),
+        approve_builder_message(account, builder_id, max_fee_rate, nonce)?,
+    )
+}
+
 pub fn sign_approve_builder(
     env: Env,
     wallet_private_key: &str,
@@ -515,8 +586,9 @@ pub fn sign_approve_builder_raw(
     nonce: &str,
     api_max_fee_rate: &str,
 ) -> Result<SignatureResult<ApproveBuilderRequest>> {
-    let account = normalize_address(account)?;
+    let account = require_checksum_address(account)?;
     let max_fee_rate_raw = parse_u256(max_fee_rate_raw, "max_fee_rate")?.to_string();
+    let api_max_fee_rate = normalize_rate(api_max_fee_rate)?;
     let nonce = parse_u256(nonce, "nonce")?.to_string();
     let hash = hash_typed_data(
         env,
@@ -533,9 +605,10 @@ pub fn sign_approve_builder_raw(
     Ok(SignatureResult {
         payload: ApproveBuilderRequest {
             builder_id: builder_id.to_string(),
-            max_fee_rate: api_max_fee_rate.to_string(),
+            max_fee_rate: api_max_fee_rate,
             nonce,
             signature: signature.clone(),
+            account: Some(account),
         },
         hash: hex0x(hash),
         signature,
@@ -702,7 +775,15 @@ fn hash_typed_data(
     fields: Value,
     message: Value,
 ) -> Result<[u8; 32]> {
-    let typed_data: TypedData = serde_json::from_value(json!({
+    let typed_data: TypedData =
+        serde_json::from_value(typed_data_json(env, primary_type, fields, message))?;
+    typed_data
+        .encode_eip712()
+        .map_err(|err| AevoError::Signing(format!("failed to encode EIP-712 data: {err}")))
+}
+
+fn typed_data_json(env: Env, primary_type: &str, fields: Value, message: Value) -> Value {
+    json!({
         "types": {
             "EIP712Domain": domain_fields(),
             primary_type: fields,
@@ -711,25 +792,51 @@ fn hash_typed_data(
         "domain": {
             "name": env.domain_name(),
             "version": "1",
-            "chainId": env.chain_id().to_string(),
+            "chainId": env.chain_id(),
         },
         "message": message,
-    }))?;
-    typed_data
-        .encode_eip712()
-        .map_err(|err| AevoError::Signing(format!("failed to encode EIP-712 data: {err}")))
+    })
 }
 
 fn sign_digest(private_key: &str, digest: [u8; 32]) -> Result<String> {
+    signature_to_hex(sign_digest_bytes(private_key, digest)?)
+}
+
+fn sign_digest_bytes(private_key: &str, digest: [u8; 32]) -> Result<[u8; 65]> {
     let signature = wallet(private_key)?
         .sign_hash(H256::from(digest))
         .map_err(|err| AevoError::Signing(format!("failed to sign digest: {err}")))?;
-    Ok(format!("0x{}", hex::encode(signature.to_vec())))
+    let bytes: [u8; 65] = signature
+        .to_vec()
+        .try_into()
+        .map_err(|_| AevoError::Signing("signature must be 65 bytes".into()))?;
+    normalize_signature_v(bytes)
 }
 
 fn sign_personal_digest(private_key: &str, digest: [u8; 32]) -> Result<String> {
     let personal_hash = hash_message(digest);
     sign_digest(private_key, personal_hash.0)
+}
+
+pub fn signature_to_hex(signature: [u8; 65]) -> Result<String> {
+    Ok(format!(
+        "0x{}",
+        hex::encode(normalize_signature_v(signature)?)
+    ))
+}
+
+fn normalize_signature_v(mut signature: [u8; 65]) -> Result<[u8; 65]> {
+    signature[64] = match signature[64] {
+        0 => 27,
+        1 => 28,
+        27 | 28 => signature[64],
+        v => {
+            return Err(AevoError::InvalidInput(format!(
+                "signature recovery id must be 0, 1, 27, or 28; got {v}"
+            )))
+        }
+    };
+    Ok(signature)
 }
 
 fn wallet(private_key: &str) -> Result<LocalWallet> {
@@ -756,9 +863,24 @@ fn normalize_address(address: &str) -> Result<String> {
     Ok(to_checksum(&parse_address(address)?, None))
 }
 
+pub(crate) fn require_checksum_address(address: &str) -> Result<String> {
+    let trimmed = address.trim();
+    let checksum = normalize_address(trimmed)?;
+    if trimmed != checksum {
+        return Err(AevoError::InvalidInput(
+            "account must be an EIP-55 checksum address".into(),
+        ));
+    }
+    Ok(checksum)
+}
+
 fn parse_u256(value: &str, field: &str) -> Result<U256> {
     U256::from_dec_str(value.trim())
         .map_err(|_| AevoError::InvalidInput(format!("{field} must be an integer string")))
+}
+
+pub(crate) fn normalize_uint_string(value: &str, field: &str) -> Result<String> {
+    Ok(parse_u256(value, field)?.to_string())
 }
 
 fn decimal_to_scaled(value: &str, field: &str, scale: u64) -> Result<String> {
@@ -826,6 +948,11 @@ fn decimal_to_scaled(value: &str, field: &str, scale: u64) -> Result<String> {
         .to_string())
 }
 
+fn normalize_decimal6(value: &str, field: &str) -> Result<String> {
+    let raw = decimal_to_scaled(value, field, SCALE_6)?;
+    raw6_to_decimal(parse_u256(&raw, field)?)
+}
+
 fn raw6_to_decimal(raw: U256) -> Result<String> {
     let scale = U256::from(SCALE_6);
     let whole = raw / scale;
@@ -854,6 +981,20 @@ fn normalize_tif(value: Option<&str>) -> Option<String> {
         Some(value) => Some(value.to_ascii_uppercase()),
         None => None,
     }
+}
+
+fn approve_builder_message(
+    account: &str,
+    builder_id: &str,
+    max_fee_rate: &str,
+    nonce: &str,
+) -> Result<Value> {
+    Ok(json!({
+        "account": require_checksum_address(account)?,
+        "builderId": builder_id,
+        "maxFeeRate": rate_to_raw(max_fee_rate)?,
+        "nonce": normalize_uint_string(nonce, "nonce")?,
+    }))
 }
 
 fn hex0x(bytes: [u8; 32]) -> String {

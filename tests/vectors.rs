@@ -3,8 +3,8 @@ use std::collections::HashSet;
 
 use aevo_sdk::config::Env;
 use aevo_sdk::models::BuilderFields;
-use aevo_sdk::signing::{self, OrderToSign};
-use serde_json::Value;
+use aevo_sdk::signing::{self, DigestSigner, LocalKeySigner, OrderToSign};
+use serde_json::{json, Value};
 
 fn vectors() -> Value {
     serde_json::from_str(include_str!("vectors/vectors.json")).unwrap()
@@ -70,6 +70,10 @@ fn raw_to_rate(raw: &str) -> String {
     } else {
         format!("{}.{}", whole.trim_start_matches('0').if_empty("0"), frac)
     }
+}
+
+fn hex32(bytes: [u8; 32]) -> String {
+    format!("0x{}", hex::encode(bytes))
 }
 
 trait EmptyDefault {
@@ -377,6 +381,118 @@ fn every_eip712_vector_matches_hash_and_signature() {
     }
 
     assert_eq!(checked, 34);
+}
+
+#[tokio::test]
+async fn every_approve_builder_vector_matches_typed_data_digest_and_local_key_signer() {
+    let root = vectors();
+    let keys = keys(&root);
+    let mut checked = 0usize;
+
+    for domain in root["domains"].as_array().unwrap() {
+        let env = env(s(&domain["id"]));
+        let expected_domain = json!({
+            "name": s(&domain["name"]),
+            "version": s(&domain["version"]),
+            "chainId": s(&domain["chain_id"]).parse::<u64>().unwrap(),
+        });
+
+        for case in domain["vectors"]["approve_builder"].as_array().unwrap() {
+            let key = &keys[s(&case["signer_key"])].0;
+            let signer = LocalKeySigner::new(key).unwrap();
+            let message = &case["message"];
+            let max_fee_rate = raw_to_rate(s(&message["maxFeeRate"]));
+            let typed_data = signing::approve_builder_typed_data(
+                env,
+                s(&message["account"]),
+                s(&message["builderId"]),
+                &max_fee_rate,
+                s(&message["nonce"]),
+            )
+            .unwrap();
+
+            assert_eq!(
+                typed_data["primaryType"],
+                "ApproveBuilder",
+                "{}",
+                s(&case["id"])
+            );
+            assert_eq!(typed_data["domain"], expected_domain, "{}", s(&case["id"]));
+            assert_eq!(
+                typed_data["types"]["EIP712Domain"],
+                json!([
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"}
+                ]),
+                "{}",
+                s(&case["id"])
+            );
+            assert_eq!(
+                typed_data["types"]["ApproveBuilder"],
+                json!([
+                    {"name": "account", "type": "address"},
+                    {"name": "builderId", "type": "string"},
+                    {"name": "maxFeeRate", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"}
+                ]),
+                "{}",
+                s(&case["id"])
+            );
+            assert_eq!(typed_data["message"], *message, "{}", s(&case["id"]));
+
+            let digest = signing::approve_builder_digest(
+                env,
+                s(&message["account"]),
+                s(&message["builderId"]),
+                &max_fee_rate,
+                s(&message["nonce"]),
+            )
+            .unwrap();
+            assert_eq!(
+                hex32(digest),
+                s(&case["eip712"]["digest"]),
+                "{}",
+                s(&case["id"])
+            );
+            assert_eq!(
+                format!(
+                    "0x{}",
+                    hex::encode(signer.sign_digest(digest).await.unwrap())
+                ),
+                s(&case["signature"]),
+                "{}",
+                s(&case["id"])
+            );
+            checked += 1;
+        }
+    }
+
+    assert_eq!(checked, 4);
+}
+
+#[test]
+fn approve_builder_external_signing_rejects_bad_inputs() {
+    assert!(matches!(
+        signing::approve_builder_typed_data(
+            Env::Testnet,
+            "0x7d19833b5af3b4e4d75dba556ded46930469fa27",
+            "builder-alpha",
+            "0.0003",
+            "1700000000123",
+        ),
+        Err(aevo_sdk::AevoError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        signing::approve_builder_digest(
+            Env::Testnet,
+            "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27",
+            "builder-alpha",
+            "0.0000001",
+            "1700000000123",
+        ),
+        Err(aevo_sdk::AevoError::InvalidInput(_))
+    ));
 }
 
 #[test]
