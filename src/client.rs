@@ -264,7 +264,57 @@ impl AevoClient {
     }
 
     pub async fn approve_builder(&self, request: &ApproveBuilderRequest) -> Result<ApiResponse> {
-        self.private_json(Method::POST, "/builder/approve", Some(request))
+        self.submit_approve_builder(request).await
+    }
+
+    pub async fn submit_approve_builder(
+        &self,
+        request: &ApproveBuilderRequest,
+    ) -> Result<ApiResponse> {
+        let auth = self.has_api_credentials();
+        let request = normalize_approve_builder_request(request, auth)?;
+        self.request(
+            Method::POST,
+            "/builder/approve",
+            Option::<&()>::None,
+            Some(&request),
+            auth,
+        )
+        .await
+    }
+
+    pub async fn approve_builder_with_signer<S: signing::DigestSigner + ?Sized>(
+        &self,
+        signer: &S,
+        builder_id: &str,
+        max_fee_rate: &str,
+        nonce: Option<u64>,
+    ) -> Result<ApiResponse> {
+        let account = signing::require_checksum_address(&signer.address())?;
+        let nonce = nonce.unwrap_or_else(signing::current_unix_timestamp_ms);
+        let nonce = nonce.to_string();
+        let digest =
+            signing::approve_builder_digest(self.env, &account, builder_id, max_fee_rate, &nonce)?;
+        let signature = signing::signature_to_hex(signer.sign_digest(digest).await?)?;
+        self.submit_approve_builder(&ApproveBuilderRequest {
+            builder_id: builder_id.to_string(),
+            max_fee_rate: max_fee_rate.to_string(),
+            nonce,
+            signature,
+            account: Some(account),
+        })
+        .await
+    }
+
+    pub async fn approve_builder_with_signer_bps<S: signing::DigestSigner + ?Sized>(
+        &self,
+        signer: &S,
+        builder_id: &str,
+        max_fee_bps: u32,
+        nonce: Option<u64>,
+    ) -> Result<ApiResponse> {
+        let max_fee_rate = signing::bps_to_rate(max_fee_bps)?;
+        self.approve_builder_with_signer(signer, builder_id, &max_fee_rate, nonce)
             .await
     }
 
@@ -469,6 +519,14 @@ impl AevoClient {
             }
         }
     }
+
+    fn has_api_credentials(&self) -> bool {
+        self.api_key.as_deref().is_some_and(|key| !key.is_empty())
+            && self
+                .api_secret
+                .as_ref()
+                .is_some_and(|secret| !secret.expose().is_empty())
+    }
 }
 
 fn ensure_cursor_offset_guard(cursor: Option<&String>, offset: Option<i64>) -> Result<()> {
@@ -478,6 +536,29 @@ fn ensure_cursor_offset_guard(cursor: Option<&String>, offset: Option<i64>) -> R
         ));
     }
     Ok(())
+}
+
+fn normalize_approve_builder_request(
+    request: &ApproveBuilderRequest,
+    has_api_credentials: bool,
+) -> Result<ApproveBuilderRequest> {
+    let account = request
+        .account
+        .as_deref()
+        .map(signing::require_checksum_address)
+        .transpose()?;
+    if account.is_none() && !has_api_credentials {
+        return Err(AevoError::InvalidInput(
+            "account is required when API credentials are not configured".into(),
+        ));
+    }
+    Ok(ApproveBuilderRequest {
+        builder_id: request.builder_id.clone(),
+        max_fee_rate: signing::normalize_rate(&request.max_fee_rate)?,
+        nonce: signing::normalize_uint_string(&request.nonce, "nonce")?,
+        signature: request.signature.clone(),
+        account,
+    })
 }
 
 fn build_http_client() -> Result<reqwest::Client> {

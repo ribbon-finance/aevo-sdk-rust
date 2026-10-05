@@ -82,6 +82,50 @@ Authentication supports both backend modes:
 - `AuthMode::Hmac`: `AEVO-KEY`, `AEVO-TIMESTAMP`, `AEVO-SIGNATURE`.
 - `AuthMode::SecretHeader`: `AEVO-KEY`, `AEVO-SECRET`.
 
+## Builder Approval Without An API Key / With External Signers
+
+Builder approvals can be submitted with only the wallet's EIP-712 approval signature when `account` is included in the request. Local private keys can use the built-in signer:
+
+```rust
+use aevo_sdk::signing::LocalKeySigner;
+use aevo_sdk::{AevoClient, Env};
+
+# async fn run() -> aevo_sdk::Result<()> {
+let client = AevoClient::builder().env(Env::Testnet).build()?;
+let signer = LocalKeySigner::new(std::env::var("AEVO_WALLET_KEY").unwrap())?;
+
+client
+    .approve_builder_with_signer(&signer, "builder-alpha", "0.0003", None)
+    .await?;
+# Ok(())
+# }
+```
+
+For KMS, HSM, MPC, or hardware-wallet custody, implement `DigestSigner`. The SDK builds the `ApproveBuilder` digest, asks your signer for a 65-byte `r || s || v` signature, normalizes `v` from `0/1` to `27/28`, and submits `/builder/approve` without auth headers unless API credentials are configured.
+
+```rust
+use aevo_sdk::signing::{DigestSigner, SignDigestFuture};
+
+struct KmsSigner {
+    account: String,
+}
+
+impl DigestSigner for KmsSigner {
+    fn address(&self) -> String {
+        self.account.clone()
+    }
+
+    fn sign_digest(&self, digest: [u8; 32]) -> SignDigestFuture<'_> {
+        Box::pin(async move {
+            let _ = digest;
+            todo!("call KMS/HSM and return [u8; 65] in r || s || v order")
+        })
+    }
+}
+```
+
+Use `signing::approve_builder_typed_data` when you need full JSON for `eth_signTypedData_v4`, or `signing::approve_builder_digest` when the signer expects the already encoded hash. The typed data signs raw 6-decimal `maxFeeRate`, for example API rate `"0.0003"` signs `"300"`.
+
 ## WebSocket
 
 The `ws` module provides frame builders plus `AevoWebSocket` for connecting, authenticating, subscribing, publishing order actions, pinging, streaming typed messages, and closing gracefully.

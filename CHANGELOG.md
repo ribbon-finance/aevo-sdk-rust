@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added external signer support for builder approvals, including EIP-712 typed-data/digest helpers, `DigestSigner`, `LocalKeySigner`, optional-auth submission, and wallet-only `/builder/approve` requests with `account`.
+
 ## [0.1.0] - unreleased
 
 ### Added

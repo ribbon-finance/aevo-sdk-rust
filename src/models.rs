@@ -123,6 +123,8 @@ pub struct ApproveBuilderRequest {
     pub max_fee_rate: String,
     pub nonce: String,
     pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

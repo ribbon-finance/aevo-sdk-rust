@@ -1,5 +1,8 @@
+use std::sync::{Arc, Mutex};
+
 use aevo_sdk::models::*;
-use aevo_sdk::{signing, AevoClient, AuthMode, BuilderErrorCode};
+use aevo_sdk::signing::{DigestSigner, SignDigestFuture};
+use aevo_sdk::{signing, AevoClient, AuthMode, BuilderErrorCode, Env};
 use serde_json::json;
 use wiremock::matchers::{
     body_json, header, header_exists, method, path, query_param, query_param_is_missing,
@@ -62,6 +65,25 @@ fn sample_withdraw() -> SignedWithdraw {
         label: None,
         reference_id: None,
         data: None,
+    }
+}
+
+#[derive(Clone)]
+struct MockDigestSigner {
+    address: String,
+    signature: [u8; 65],
+    digests: Arc<Mutex<Vec<[u8; 32]>>>,
+}
+
+impl DigestSigner for MockDigestSigner {
+    fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    fn sign_digest(&self, digest: [u8; 32]) -> SignDigestFuture<'_> {
+        self.digests.lock().unwrap().push(digest);
+        let signature = self.signature;
+        Box::pin(async move { Ok(signature) })
     }
 }
 
@@ -404,6 +426,7 @@ async fn write_methods_send_expected_methods_paths_bodies_and_auth_headers() {
             max_fee_rate: "0.0005".into(),
             nonce: "1700000000000".into(),
             signature: "0xsig".into(),
+            account: None,
         })
         .await
         .unwrap();
@@ -411,6 +434,164 @@ async fn write_methods_send_expected_methods_paths_bodies_and_auth_headers() {
         .revoke_builder("builder_0123456789abcdef")
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn submit_approve_builder_without_credentials_sends_account_and_no_auth_headers() {
+    let server = MockServer::start().await;
+    let client = AevoClient::builder()
+        .base_url(server.uri())
+        .build()
+        .unwrap();
+
+    Mock::given(method("POST"))
+        .and(path("/builder/approve"))
+        .and(body_json(json!({
+            "builder_id": "builder-alpha",
+            "max_fee_rate": "0.0003",
+            "nonce": "1700000000123",
+            "signature": "0xsig",
+            "account": "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27"
+        })))
+        .and(|request: &wiremock::Request| {
+            !request.headers.contains_key("AEVO-KEY")
+                && !request.headers.contains_key("AEVO-SIGNATURE")
+                && !request.headers.contains_key("AEVO-SECRET")
+        })
+        .respond_with(ok_json())
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .submit_approve_builder(&ApproveBuilderRequest {
+            builder_id: "builder-alpha".into(),
+            max_fee_rate: "0.000300".into(),
+            nonce: "1700000000123".into(),
+            signature: "0xsig".into(),
+            account: Some("0x7D19833b5aF3b4e4D75DBA556ded46930469FA27".into()),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn submit_approve_builder_with_credentials_sends_auth_headers() {
+    let server = MockServer::start().await;
+    let client = client(&server);
+
+    private("POST", "/builder/approve")
+        .and(body_json(json!({
+            "builder_id": "builder-alpha",
+            "max_fee_rate": "0.0003",
+            "nonce": "1700000000123",
+            "signature": "0xsig",
+            "account": "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27"
+        })))
+        .respond_with(ok_json())
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client
+        .submit_approve_builder(&ApproveBuilderRequest {
+            builder_id: "builder-alpha".into(),
+            max_fee_rate: "0.000300".into(),
+            nonce: "1700000000123".into(),
+            signature: "0xsig".into(),
+            account: Some("0x7D19833b5aF3b4e4D75DBA556ded46930469FA27".into()),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn approve_builder_with_signer_signs_digest_and_normalizes_recovery_id() {
+    for (input_v, expected_v) in [(0u8, 27u8), (1u8, 28u8)] {
+        let server = MockServer::start().await;
+        let client = AevoClient::builder()
+            .env(Env::Testnet)
+            .base_url(server.uri())
+            .build()
+            .unwrap();
+        let mut signature = [0x11u8; 65];
+        signature[64] = input_v;
+        let mut expected_signature = signature;
+        expected_signature[64] = expected_v;
+        let expected_signature = format!("0x{}", hex::encode(expected_signature));
+        let digests = Arc::new(Mutex::new(Vec::new()));
+        let signer = MockDigestSigner {
+            address: "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27".into(),
+            signature,
+            digests: Arc::clone(&digests),
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/builder/approve"))
+            .and(body_json(json!({
+                "builder_id": "builder-alpha",
+                "max_fee_rate": "0.0003",
+                "nonce": "1700000000123",
+                "signature": expected_signature,
+                "account": "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27"
+            })))
+            .and(|request: &wiremock::Request| {
+                !request.headers.contains_key("AEVO-KEY")
+                    && !request.headers.contains_key("AEVO-SIGNATURE")
+            })
+            .respond_with(ok_json())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client
+            .approve_builder_with_signer(&signer, "builder-alpha", "0.0003", Some(1700000000123))
+            .await
+            .unwrap();
+
+        let expected_digest = signing::approve_builder_digest(
+            Env::Testnet,
+            "0x7D19833b5aF3b4e4D75DBA556ded46930469FA27",
+            "builder-alpha",
+            "0.0003",
+            "1700000000123",
+        )
+        .unwrap();
+        assert_eq!(digests.lock().unwrap().as_slice(), &[expected_digest]);
+    }
+}
+
+#[tokio::test]
+async fn submit_approve_builder_rejects_bad_account_and_rate() {
+    let server = MockServer::start().await;
+    let client = AevoClient::builder()
+        .base_url(server.uri())
+        .build()
+        .unwrap();
+
+    let bad_account = client
+        .submit_approve_builder(&ApproveBuilderRequest {
+            builder_id: "builder-alpha".into(),
+            max_fee_rate: "0.0003".into(),
+            nonce: "1700000000123".into(),
+            signature: "0xsig".into(),
+            account: Some("0x7d19833b5af3b4e4d75dba556ded46930469fa27".into()),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(bad_account, aevo_sdk::AevoError::InvalidInput(_)));
+
+    let bad_rate = client
+        .submit_approve_builder(&ApproveBuilderRequest {
+            builder_id: "builder-alpha".into(),
+            max_fee_rate: "0.0000001".into(),
+            nonce: "1700000000123".into(),
+            signature: "0xsig".into(),
+            account: Some("0x7D19833b5aF3b4e4D75DBA556ded46930469FA27".into()),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(bad_rate, aevo_sdk::AevoError::InvalidInput(_)));
 }
 
 #[tokio::test]
